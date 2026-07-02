@@ -129,11 +129,25 @@ Required Permissions (Scopes):
           }
           {%- endlog -%}
 
+          {% comment %} SEO title/description are optional — the webhook only
+            returns them when generation succeeds. Write them via the productUpdate
+            seo input when present so the SERP snippet is hand-crafted rather than
+            Shopify's default (raw title + auto-truncated body). {% endcomment %}
+          {% assign seo_title = response_data.seo_title %}
+          {% assign seo_description = response_data.seo_description %}
+          {% assign has_seo = false %}
+          {% if seo_title != blank or seo_description != blank %}
+            {% assign has_seo = true %}
+          {% endif %}
+
           {%- log -%}
           {
             "stage": "triggering_product_update",
             "product_id": {{ product_id | json }},
-            "description_length": {{ response_data.description_html | size | json }}
+            "description_length": {{ response_data.description_html | size | json }},
+            "has_seo": {{ has_seo | json }},
+            "seo_title": {{ seo_title | json }},
+            "seo_description": {{ seo_description | json }}
           }
           {%- endlog -%}
 
@@ -142,14 +156,28 @@ Required Permissions (Scopes):
               productUpdate(input: {
                 id: {{ product_id | json }},
                 descriptionHtml: {{ response_data.description_html | json }}
+                {%- if has_seo -%}
+                  , seo: {
+                    {%- if seo_title != blank -%}
+                      title: {{ seo_title | json }}
+                    {%- endif -%}
+                    {%- if seo_title != blank and seo_description != blank -%}
+                      ,
+                    {%- endif -%}
+                    {%- if seo_description != blank -%}
+                      description: {{ seo_description | json }}
+                    {%- endif -%}
+                  }
+                {%- endif -%}
               }) {
-                product { 
-                  id 
-                  descriptionHtml 
+                product {
+                  id
+                  descriptionHtml
+                  seo { title description }
                 }
-                userErrors { 
-                  field 
-                  message 
+                userErrors {
+                  field
+                  message
                 }
               }
               metafieldsSet(metafields: [{

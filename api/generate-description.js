@@ -16,6 +16,22 @@ const withTimeout = (promise, timeoutMs) =>
 const stripCodeFences = (s) =>
   (s || "").replace(/^```[a-z]*\n?/i, "").replace(/```$/i, "").trim();
 
+// SEO field caps: Google truncates titles ~60 chars and meta descriptions
+// ~155 chars in the SERP. Clamp server-side at a word boundary as a safety net
+// so an over-long model response can never ship a mid-word cut-off snippet.
+const SEO_TITLE_MAX = 60;
+const SEO_DESCRIPTION_MAX = 155;
+
+const clampAtWord = (text, max) => {
+  const normalised = (text || "").replace(/\s+/g, " ").trim();
+  if (normalised.length <= max) return normalised;
+  const slice = normalised.slice(0, max);
+  const lastSpace = slice.lastIndexOf(" ");
+  // Only cut at the last space if it doesn't lop off too much of the string.
+  const cut = lastSpace > max * 0.6 ? slice.slice(0, lastSpace) : slice;
+  return cut.replace(/[\s|,.;:–—-]+$/, "").trim();
+};
+
 export default async function handler(req, res) {
   const timeout = setTimeout(() => {
     if (!res.headersSent) {
@@ -105,11 +121,23 @@ export default async function handler(req, res) {
       "- If provided, output it verbatim as the FIRST paragraph.",
       "- Then continue with the structure above.",
       "",
+      "SEO TITLE (seo_title):",
+      "- Owns the SERP snippet — hand-crafted, high-intent, ≤60 characters.",
+      "- Lead with 'Pre-Owned', then Brand + Style, then Size and Colour if they fit.",
+      "- End with ' | Lilac Blue London' whenever the character budget allows.",
+      "- Drop the lowest-priority element (colour, then size, then the suffix) to stay within 60 characters rather than truncating a word.",
+      "- Example: 'Pre-Owned Hermès Kelly 25cm Bleu Royale | Lilac Blue London'.",
+      "",
+      "SEO META DESCRIPTION (seo_description):",
+      "- One factual, benefit-led sentence, ≤155 characters.",
+      "- Must include 'pre-owned' or 'authenticated', the Brand + Style, and one concrete attribute (size, colour, material, or condition).",
+      "- No hype adjectives; match the catalogue tone. British English.",
+      "",
       "OUTPUT RULES:",
-      "- Plain text only.",
-      "- British English.",
-      "- No bullet points, no markdown, no HTML.",
-      "- 100–180 words unless Editor’s Note is present.",
+      "- Return a SINGLE JSON object with exactly these keys: \"description\", \"seo_title\", \"seo_description\".",
+      "- \"description\": the body copy following every rule above — plain text, British English, no bullet points, no markdown, no HTML, 100–180 words unless an Editor’s Note is present.",
+      "- \"seo_title\" and \"seo_description\": as specified above.",
+      "- Output ONLY the JSON object. No commentary, no code fences.",
       "",
       "INPUT JSON:",
       JSON.stringify(
@@ -132,30 +160,46 @@ export default async function handler(req, res) {
           {
             role: "system",
             content:
-              "You are a catalogue copywriter for a luxury resale business. Be precise, factual, and concise.",
+              "You are a catalogue copywriter for a luxury resale business. Be precise, factual, and concise. Respond with a single JSON object only.",
           },
           { role: "user", content: prompt },
         ],
         temperature: 0.15,
         presence_penalty: 0,
         frequency_penalty: 0,
+        response_format: { type: "json_object" },
       }),
       45000
     );
 
     const raw = completion.choices?.[0]?.message?.content || "";
-    const descriptionText = stripCodeFences(raw);
+
+    let parsed;
+    try {
+      parsed = JSON.parse(stripCodeFences(raw));
+    } catch {
+      parsed = null;
+    }
+
+    const descriptionText = stripCodeFences(parsed?.description || "");
 
     if (!descriptionText) {
       clearTimeout(timeout);
       return res.status(500).json({ error: "Empty AI output" });
     }
 
-      clearTimeout(timeout);
-      return res.status(200).json({ 
-        description_html: descriptionText,
-        product_id: product.id 
-      });
+    // SEO fields are best-effort: clamp to length, but never fail the request if
+    // the model omits them — the description write is the critical path.
+    const seoTitle = clampAtWord(parsed?.seo_title, SEO_TITLE_MAX);
+    const seoDescription = clampAtWord(parsed?.seo_description, SEO_DESCRIPTION_MAX);
+
+    clearTimeout(timeout);
+    return res.status(200).json({
+      description_html: descriptionText,
+      seo_title: seoTitle || undefined,
+      seo_description: seoDescription || undefined,
+      product_id: product.id,
+    });
   } catch (err) {
     clearTimeout(timeout);
     if (res.headersSent) return;
